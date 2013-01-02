@@ -192,21 +192,43 @@ sub retrieve_pdls {
 	return $to_return[0];
 }
 
-# Now for a nasty hack: this code modifies PDL::IO::FastRaw's symbol table
-# so that it adds the "mmapped_filename" key to the piddle's header before
-# returning the result. As long as the user says "use PDL::IO::FastRaw"
-# *after* using this module, this will allow for transparent sharing of both
-# memory mapped and standard piddles.
 
+
+#### FastRaw stuff ####
+
+# Now for a fun hack: this code modifies PDL::IO::FastRaw's symbol table
+# so that it adds the "mmapped_filename" key to the piddle's header before
+# returning the result.
+
+# Let's define the new mapfraw that we want to use. This simply wraps the call
+# in a little code block that also adds the mmaped_filename field to the
+# returned piddle's header:
+my $original_mapfraw = \&PDL::IO::FastRaw::mapfraw;
+sub my_mapfraw {
+	my $name = $_[0];
+	my $to_return = $original_mapfraw->(@_);
+	$to_return->hdr->{mmapped_filename} = $name;
+	return $to_return;
+}
+
+# Now see if the calling package has the Fastraw's mapfraw method imported,
+# in which case I need to overwrite it and issue a warning. Note we only need to
+# do this check once (i.e. not in the import() method) because this will modify
+# FastRaw's mapfraw, so any future call will always get the correct function.
+# Note that this does not *insert* the mapfraw method into the caller's package
+# where none existed. It only *replaces* mapfraw if it's already there.
+my $package = caller;
+my $caller_subref = $package->can('mapfraw');
+if ($subref and $subref == $original_mapfraw) {
+	carp('Please use PDL::IO::FastRaw *after* PDL::Parallel::threads');
+	no warnings 'redefine';
+	eval '*' . $package . '::mapfraw' = \&my_mapfraw;
+}
+
+# Finally, update PDL::IO::FastRaw so that it uses our fancy wrapper
 {
 	no warnings 'redefine';
-	my $old_sub = \&PDL::IO::FastRaw::mapfraw;
-	*PDL::IO::FastRaw::mapfraw = sub {
-		my $name = $_[0];
-		my $to_return = $old_sub->(@_);
-		$to_return->hdr->{mmapped_filename} = $name;
-		return $to_return;
-	};
+	*PDL::IO::FastRaw::mapfraw = \&my_mapfraw;
 }
 
 1;
@@ -592,6 +614,17 @@ interfere with or screw up bad values, either.
 =head1 DIAGNOSTICS
 
 =over
+
+=item C<< Please use PDL::IO::FastRaw *after* PDL::Parallel::threads >>
+
+In order to help C<PDL::Parallel::threads> identify memory mapped piddles that
+are mapped using L<PDL::IO::FastRaw>, this module makes a minor modification to
+L<PDL::IO::FastRaw/mapfraw>. If you use L<PDL::IO::FastRaw> I<before> you use
+C<PDL::Parallel::threads> (and C<PDL::Parallel::threads> has not been pulled in
+by some other module already), this will detect it and issue a warning. It will
+do its best to fix your package's copy of C<mapfraw> and your program should run
+fine, but you should do your best to load C<PDL::Parallel::threads> before
+anything loads L<PDL::IO::FastRaw>.
 
 =item C<< share_pdls: expected key/value pairs >>
 
